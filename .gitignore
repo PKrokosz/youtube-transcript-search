@@ -1,0 +1,14 @@
+# Cache napisów (lokalne, nie commitujemy)
+.cache/
+*.vtt
+
+# Konfiguracja z proxy/sekretami
+youtube.config.json
+
+# Raporty z testów
+e2e-*-report.json
+*.log
+
+# Node
+node_modules/
+npm-debug.log*

@@ -1,0 +1,20 @@
+{
+  "name": "youtube-transcript-search",
+  "version": "1.0.0",
+  "private": false,
+  "description": "MCP server + CLI: search YouTube videos and grep their transcripts for keywords.",
+  "license": "MIT",
+  "type": "module",
+  "main": "mcp-server.mjs",
+  "bin": {
+    "yts": "youtube-transcripts.mjs"
+  },
+  "scripts": {
+    "mcp": "node mcp-server.mjs",
+    "test": "node e2e-youtube.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "keywords": ["mcp", "youtube", "transcript", "search", "agent", "yt-dlp"]
+}
