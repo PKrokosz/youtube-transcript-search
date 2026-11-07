@@ -2,12 +2,26 @@
 .cache/
 *.vtt
 
+# Stan jobów batch (lokalny, zapis dni pracy)
+jobs/
+# Katalog per-job trzyma też log; *.log na wszelki wypadek
+*.log
+
 # Konfiguracja z proxy/sekretami
 youtube.config.json
+cookies.txt
+# Plik z jawnie podaną listą ID (może zawierać cokolwiek)
+ids*.txt
 
 # Raporty z testów
 e2e-*-report.json
 *.log
+
+# Artefakty robocze review (brief, draft, raporty, stan review)
+concepts_brief.md
+design_draft.md
+docs/designs/*_report.md
+docs/designs/review_status.md
 
 # Node
 node_modules/

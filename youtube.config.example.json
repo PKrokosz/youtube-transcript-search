@@ -1,0 +1,32 @@
+{
+  "//": "Szablon. Skopiuj do youtube.config.json (gitignored) LUB ustaw zmienne środowiskowe. Kolejność: env, potem ten plik.",
+  "//ytDlpPath": "Sciezka do yt-dlp (domyslnie: env YT_DLP, potem PATH, potem ~/.local/bin/yt-dlp.exe)",
+  "ytDlpPath": "",
+
+  "//tmp": "Katalog na tymczasowe pliki VTT (domyslnie: katalog temp systemowy)",
+  "tmp": "",
+
+  "//youtubeApiKey": "Klucz YouTube Data API v3 - wymagany TYLKO dla zrodla --search w trybie job",
+  "youtubeApiKey": "AIzaSy...",
+
+  "//searchBackend": "Tryb wyszukiwania w sciezce interaktywnej: auto | api | yt-dlp",
+  "searchBackend": "auto",
+
+  "//proxy": "Proxy rezydencjalne. Sekret - nie podawaj w linii komend. Env: YTS_PROXY, HTTPS_PROXY, ALL_PROXY",
+  "proxy": "",
+
+  "//cookiesFile": "Sciezka do pliku cookies (nie zawartosc!). Domyslnie ~/.config/yts/cookies.txt, poza repozytorium",
+  "cookiesFile": "",
+
+  "//jobDir": "Katalog stanu jobow (domyslnie: <katalog modulu>/jobs/)",
+  "jobDir": "",
+
+  "//cacheDir": "Katalog cache napisow (domyslnie: <katalog modulu>/.cache/)",
+  "cacheDir": "",
+
+  "//intervalMs": "Odstep miedzy filmami w jobie. Placeholder — potwierdza testStage 1 (domyslnie 4000)",
+  "intervalMs": 4000,
+
+  "//rlStop": "Stop po N kolejnych 429 w jobie. Placeholder (domyslnie 5; z proxy 12)",
+  "rlStop": 5
+}
