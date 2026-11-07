@@ -480,6 +480,8 @@ export async function searchTranscripts(query, keywords, limit = 5, langs = "en"
       transcriptAvailable: t.ok,
       transcriptError: t.ok ? undefined : t.error,
       reason: t.ok ? null : (t.reason || "unknown"),
+      lang: t.ok ? (t.lang || null) : null,
+      kind: t.ok ? (t.kind || null) : null,
       cache: t.cache ?? null,
       transcriptLength: t.text.length,
       keywords: hits,

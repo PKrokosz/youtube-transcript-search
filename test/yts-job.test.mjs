@@ -58,6 +58,18 @@ function emit(kind) {
   process.stderr.write(errFor[kind].replace("'X'", "'pl'") + "\\n");
   process.exit(1);
 }
+const searchArg = args.find((a) => a.startsWith("ytsearch"));
+if (searchArg) {
+  log("search");
+  const n = Number((searchArg.match(/ytsearch(\\d+):/) || [])[1] || 2);
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const id = ["AAAAAAAAAAA", "BBBBBBBBBBB", "CCCCCCCCCCC", "DDDDDDDDDDD"][i % 4];
+    out.push(JSON.stringify({ id, title: "film testowy " + i, channel: "Kanal " + i, duration: 100 + i }));
+  }
+  process.stdout.write(out.join("\\n") + "\\n");
+  process.exit(0);
+}
 const isList = args.includes("--print-json");
 if (isList) {
   log("list");
@@ -635,6 +647,22 @@ createServer((req, res) => {
     r = run(["new", "--channel", "UC123", "--langs", "pl", "--keywords", "a", "--job-dir", dir]);
     ok("CLI new: channel bez --max-videos -> exit 1", r.status === 1 && /--max-videos/.test(r.stderr), r.stderr.slice(0, 140));
     srv.kill();
+  }
+
+
+  // ============ 16) one-shot CLI: --search na shimie (Goal 2, D9) =========
+  {
+    const shimSearch = makeShim(mkdtempSync(join(tmpdir(), "yts-srch-")), { [ID_A]: RULE.manual, [ID_B]: RULE.eUnavail });
+    const r = spawnSync("node", [join(ROOT, "youtube-transcripts.mjs"), "--search", "prezydent", "--limit", "2", "--keywords", "rust", "--langs", "pl"], { encoding: "utf8", env: { ...process.env, YT_DLP: shimSearch, YOUTUBE_SEARCH_BACKEND: "yt-dlp" } });
+    ok("CLI --search: exit 0", r.status === 0, String(r.status) + " " + r.stderr.slice(0, 200));
+    let arr = null;
+    try { arr = JSON.parse(r.stdout); } catch {}
+    ok("CLI --search: zwraca wpisy", !!arr && arr.length === 2, String(arr && arr.length));
+    ok("CLI --search: kazdy wpis ma reason (Goal 2)", !!arr && arr.every((v) => "reason" in v && (v.reason === null || typeof v.reason === "string")), JSON.stringify(arr && arr.map((v) => v.reason)));
+    ok("CLI --search: mianowniki na stderr", /kandydaci=2/.test(r.stderr) && /z napisami=/.test(r.stderr) && /bez napis/.test(r.stderr), r.stderr.trim().split("\n").pop());
+    ok("CLI --search: lang jako kod jezyka (nie vtt)", !!arr && arr.every((v) => v.transcriptAvailable === false || typeof v.lang === "string"), JSON.stringify(arr && arr.map((v) => v.lang)));
+    ok("CLI --search: kind na wpisach z napisami", !!arr && arr.filter((v) => v.transcriptAvailable).every((v) => typeof v.kind === "string"), JSON.stringify(arr && arr.map((v) => v.kind)));
+    ok("CLI --search: reason niszy niz reason z yt-dlp (bez pustego wyniku)", !!arr && arr.some((v) => v.reason === "video_unavailable"), JSON.stringify(arr && arr.map((v) => v.reason)));
   }
 
   rmSyncSync(shimDir);
