@@ -12,7 +12,14 @@
 //       "command": "node", "args": ["<absolutna ścieżka>/mcp-server.mjs"] } } }
 
 import { createInterface } from "node:readline";
-import { youtubeSearch, youtubeTranscript, searchTranscripts, findKeywords } from "./youtube-transcripts.mjs";
+import { youtubeSearch, youtubeTranscript, searchTranscripts, findKeywords, loadConfig } from "./youtube-transcripts.mjs";
+import { validVideoId } from "./lib/ytsub-job.mjs";
+
+// D7: capy sa twarde — nad limitem odmowa z nazwa komendy CLI, nie ciche obciecie.
+const CAPS = { youtube_search: 25, youtube_transcript_search: 15 };
+function capError(tool, cap, asked) {
+  return new Error(`limit=${asked} przekracza maksimum ${cap} dla ${tool}. Nie obcinam wyniku w milczeniu — uzyj CLI: node youtube-transcripts.mjs --search "..." --limit ${asked} --keywords ...`);
+}
 
 const TOOLS = [
   {
@@ -69,13 +76,19 @@ function idFrom(video) {
 }
 
 async function callTool(name, args) {
+  const cfg = loadConfig();
   if (name === "youtube_search") {
-    return youtubeSearch(args.query, Math.min(args.limit || 5, 25));
+    const asked = Number(args.limit || 5);
+    if (asked > CAPS.youtube_search) throw capError("youtube_search", CAPS.youtube_search, asked);
+    return youtubeSearch(args.query, Math.min(asked, CAPS.youtube_search));
   }
   if (name === "youtube_transcript") {
     const id = idFrom(args.video);
-    const t = await youtubeTranscript(id, args.langs || "en");
-    if (!t.ok) throw new Error(t.error);
+    if (!validVideoId(id)) throw new Error(`nieprawidlowe ID filmu: "${id}". Wymagane 11 znakow [A-Za-z0-9_-] (np. dQw4w9WgXcQ) albo pelny URL watch?v=<id>.`);
+    // D7: cacheDir zawsze podany, zeby `cache` bylo wypelnione na tej sciezce;
+    // read-through oddaje pierwszy jezyk z --langs, manual przed auto (D5).
+    const t = await youtubeTranscript(id, args.langs || "en", { cacheDir: cfg.cacheDir, captionPreference: "manual_first" });
+    if (!t.ok) throw new Error(`${t.reason || "unknown"}: ${t.error}`);
     const max = args.maxChars === 0 ? t.text.length : args.maxChars || 8000;
     return {
       videoId: id,
@@ -83,12 +96,15 @@ async function callTool(name, args) {
       lang: t.lang,
       length: t.text.length,
       segments: t.segments.length,
+      cache: t.cache ?? null,
       keywords: args.keywords && args.keywords.length ? findKeywords(t.text, args.keywords) : undefined,
       text: t.text.slice(0, max),
     };
   }
   if (name === "youtube_transcript_search") {
-    return searchTranscripts(args.query, args.keywords || [], Math.min(args.limit || 5, 15), args.langs || "en");
+    const asked = Number(args.limit || 5);
+    if (asked > CAPS.youtube_transcript_search) throw capError("youtube_transcript_search", CAPS.youtube_transcript_search, asked);
+    return searchTranscripts(args.query, args.keywords || [], Math.min(asked, CAPS.youtube_transcript_search), args.langs || "en");
   }
   throw new Error(`Unknown tool: ${name}`);
 }

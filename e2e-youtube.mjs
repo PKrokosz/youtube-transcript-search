@@ -56,6 +56,17 @@ function step(name, ok, detail) {
     const withHits = arr.filter(v=>v.transcriptAvailable && (v.keywords||[]).some(k=>k.count>0));
     step("youtube_transcript_search", arr.length>0, "videos="+arr.length+" withHits="+withHits.length);
     if (arr[0]) console.log("   ->", arr[0].title, "| transcript:", arr[0].transcriptAvailable, "| len:", arr[0].transcriptLength);
+
+    // D7: dodatki do kontraktu — odmowa nad limitem, odmowa złego ID, cache, lang, reason.
+    const overCap = await send("tools/call",{name:"youtube_search",arguments:{query:"rust headless browser",limit:99}});
+    const overCapText = textOf(overCap);
+    step("refuse over cap (no silent clamp)", /^Error:.*limit=99/.test(overCapText), overCapText.slice(0,100));
+    const badId = await send("tools/call",{name:"youtube_transcript",arguments:{video:"krotkie"}});
+    const badIdText = textOf(badId);
+    step("refuse invalid video id", /^Error:.*nieprawidlowe ID/.test(badIdText), badIdText.slice(0,100));
+    step("cache field on transcript", ["ok","stale","missing","raw_missing",null].includes(tr.cache), "cache="+tr.cache);
+    step("lang is a language code (not ext)", /^[a-z]{2,3}(-[A-Z]{2})?$/.test(String(tr.lang)), "lang="+tr.lang);
+    step("reason on every search entry", arr.every(v=>"reason" in v && (v.reason===null || typeof v.reason==="string")), arr.map(v=>v.reason).join(","));
   } catch(e) {
     report.errors.push(String(e&&e.stack||e));
     step("exception", false, String(e));
