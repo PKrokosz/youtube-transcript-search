@@ -86,29 +86,46 @@ function parseArgs(cmd, argv) {
   return a;
 }
 
+// Node 24 na Windowsie: process.exit() tuż po fetch (undici trzyma gniazdo)
+// wywapuje w asercję libuv i proces konczy się kodem abortu. Po fetchu
+// ustawiamy więc tylko kod wyjscia i konczymy naturalnie.
+let didFetch = false;
+function markFetched() { didFetch = true; }
+function exitNow(code) {
+  process.exitCode = code;
+  if (!didFetch) process.exit(code);
+}
 function errUsage(msg) {
   process.stderr.write(`[yts-job] ${msg}\n${USAGE}\n`);
-  process.exit(1);
+  exitNow(1); return;
 }
 
 function log(m) { if (process.env.YTS_QUIET !== "1") process.stderr.write(`[yts-job] ${m}\n`); }
 function fail(e, fallback = 4) {
   process.stderr.write(`[yts-job] ${e && e.message}\n`);
-  process.exit(e instanceof JobError ? e.code : (e && e.exitCode) || fallback);
+  exitNow(e instanceof JobError ? e.code : (e && e.exitCode) || fallback); return;
 }
 
 async function loadCfg(strict) {
   try { return loadConfig(strict); }
-  catch (e) { process.stderr.write(`[yts-job] ${e && e.message}\n`); process.exit(5); }
+  catch (e) { process.stderr.write(`[yts-job] ${e && e.message}\n`); exitNow(5); }
 }
 
-function defaultCookiesFile(cfg) {
+// Sciezka cookies: flaga CLI bije env, env bije config. Domyslna sciezka
+// (~/.config/yts/cookies.txt) liczy sie tylko gdy plik istnieje — yt-dlp
+// z nieistniejaca sciezka wychodzi kodem 2 i wywraca caly job (sprawdzone na zywo).
+function resolveCookiesPath(cfg, flagPath) {
+  if (flagPath) return flagPath;
+  if (process.env.YTS_COOKIES_FILE) return process.env.YTS_COOKIES_FILE;
   if (cfg.cookiesFile) return cfg.cookiesFile;
-  const p = join(homedir(), ".config", "yts", "cookies.txt");
-  return p;
+  const def = join(homedir(), ".config", "yts", "cookies.txt");
+  return existsSync(def) ? def : "";
 }
 
+// `num` dla licznikow (>0: rl-stop, max-videos, budget); `num0` dla odstepu,
+// gdzie 0 jest sensowną wartością (demo/test: bez czekania między filmami).
 function num(v, dflt) { const n = Number(v); return Number.isFinite(n) && n > 0 ? n : dflt; }
+function num0(v, dflt) { const n = Number(v); return Number.isFinite(n) && n >= 0 ? n : dflt; }
 
 function collectIds(a) {
   const ids = [];
@@ -137,10 +154,10 @@ function doctor(cfg, jobDir) {
     youtubeApiKey: { present: !!cfg.youtubeApiKey, origin: cfg.youtubeApiKey ? (process.env.YOUTUBE_API_KEY ? "YOUTUBE_API_KEY" : "config.youtubeApiKey") : "nie ustawiony" },
     searchBackend: { value: cfg.searchBackend, origin: process.env.YOUTUBE_SEARCH_BACKEND ? "YOUTUBE_SEARCH_BACKEND" : cfg.searchBackend ? "config" : "domyslny (auto)" },
     proxy: { present: !!cfg.proxy, masked: maskProxy(cfg.proxy), origin: cfg.proxySource || "nie ustawiony", allProxySource: cfg.allProxySource || null },
-    cookiesFile: { value: defaultCookiesFile(cfg) || null, origin: process.env.YTS_COOKIES_FILE ? "YTS_COOKIES_FILE" : cfg.cookiesFile ? "config.cookiesFile" : "domyslny <home>/.config/yts/cookies.txt" },
+    cookiesFile: { value: resolveCookiesPath(cfg) || null, origin: process.env.YTS_COOKIES_FILE ? "YTS_COOKIES_FILE" : cfg.cookiesFile ? "config.cookiesFile" : "domyslny <home>/.config/yts/cookies.txt" },
     jobDir: { value: resolveJobDir(jobDir), origin: jobDirArgOrigin(jobDir) },
     cacheDir: { value: cfg.cacheDir || "<katalog skryptu>/.cache", origin: process.env.YTS_CACHE_DIR ? "YTS_CACHE_DIR" : cfg.cacheDir ? "config.cacheDir" : "domyslny" },
-    intervalMs: { value: num(process.env.YTS_INTERVAL_MS || cfg.intervalMs || 4000, 4000), origin: process.env.YTS_INTERVAL_MS ? "YTS_INTERVAL_MS" : cfg.intervalMs ? "config.intervalMs" : "domyslny 4000 (placeholder etapu 1)" },
+    intervalMs: { value: num0(process.env.YTS_INTERVAL_MS || cfg.intervalMs || 4000, 4000), origin: process.env.YTS_INTERVAL_MS ? "YTS_INTERVAL_MS" : cfg.intervalMs ? "config.intervalMs" : "domyslny 4000 (placeholder etapu 1)" },
     caps: { youtube_search: 25, youtube_transcript_search: 15, note: "nad limitem odmowa, nie ciche obciecie (D7)" },
     sources: ["--search (wymaga klucza)", "--channel", "--playlist", "--ids-file/--id"],
     filterKeys: FILTER_KEYS,
@@ -158,20 +175,23 @@ function jobDirArgOrigin(jobDir) {
 async function main() {
   const argv = process.argv.slice(2);
   const cmd = argv[0];
-  if (!cmd || cmd === "help") { process.stdout.write(USAGE); process.exit(0); }
+  if (!cmd || cmd === "help") { process.stdout.write(USAGE); exitNow(0); }
   const a = parseArgs(cmd, argv.slice(1));
-  if (a.help) { process.stdout.write(USAGE); process.exit(0); }
-  const jobDir = a["job-dir"] || undefined, cacheDir = a["cache-dir"] || undefined;
+  if (a.help) { process.stdout.write(USAGE); exitNow(0); return; }
+  // Config raz na proces: `new` chce trybu strict (zly plik = exit 5, Goal 6).
+  const cfg = cmd === "new" ? await loadCfg(true) : await loadCfg(false);
+  // Flaga bije env, env bije config — loadConfig juz rozwiazuje env, tutaj tylko
+  // doklejamy wartosci z pliku config (D6: sekrety nigdy z argv).
+  const jobDir = a["job-dir"] || cfg.jobDir || undefined;
+  const cacheDir = a["cache-dir"] || cfg.cacheDir || undefined;
 
   if (cmd === "doctor") {
-    const cfg = await loadCfg(false);
-    process.stdout.write(JSON.stringify(doctor(cfg), null, 2) + "\n");
-    process.exit(0);
+    process.stdout.write(JSON.stringify(doctor(cfg, jobDir), null, 2) + "\n");
+    exitNow(0); return;
   }
 
   if (cmd === "new") {
     if (a.proxy) errUsage("--proxy w linii komend jest zabroniony (D6). Uzyj YTS_PROXY, HTTPS_PROXY albo ALL_PROXY.");
-    const cfg = await loadCfg(true);
     if (!a.langs) errUsage("--langs jest wymagane (D5: bez domyslnej wartosci)");
     if (!a.keywords) errUsage("--keywords jest wymagane");
     const { filters, errors } = parseFilters(a.filter || []);
@@ -187,13 +207,14 @@ async function main() {
     const keywords = String(a.keywords).split(",").map((s) => s.trim()).filter(Boolean);
 
     // --- dry-run: rozwiazanie zrodla, zero pobran, zero state.json ----------
+    markFetched();
     let resolved;
     try {
       resolved = await resolveCandidates({ search: a.search, channel: a.channel, playlist: a.playlist, ids, filters }, {
         apiKey: cfg.youtubeApiKey, apiBase: process.env.YTS_API_BASE, maxVideos, budgetUnits,
         captionPreFilter: !!a["caption-prefilter"], fetchJson: process.env.YTS_API_BASE ? undefined : undefined,
       });
-    } catch (e) { fail(e, 4); }
+    } catch (e) { fail(e, 4); return; }
     const src = (resolved.sources || [])[0] || {};
     if (a["dry-run"]) {
       const lines = [];
@@ -206,7 +227,7 @@ async function main() {
       process.stderr.write(`[yts-job] dry-run: ${lines.join(" | ")}\n`);
       process.stderr.write(`[yts-job] dry-run: zadne pobranie napisow, zadne videos.list, zadne yt-dlp, brak state.json\n`);
       process.stdout.write(JSON.stringify({ dryRun: true, source: src.type, candidates: resolved.candidates.length, apiUnits: resolved.apiUnits, ids: resolved.candidates }, null, 2) + "\n");
-      process.exit(0);
+      exitNow(0); return;
     }
 
     const jobId = a.job || `job-${new Date().toISOString().replace(/[:.]/g, "-")}`;
@@ -215,47 +236,52 @@ async function main() {
       jobId, langs: a.langs, captionPreference: "manual_first", keywords,
       quotaBudget: budgetUnits, jobDir, cacheDir,
       candidateIds: resolved.candidates, sources: resolved.sources,
-      pacing: { intervalMs: num(a["interval-ms"], cfg.intervalMs || 4000), rlStop: num(a["rl-stop"], 5) },
+      pacing: { intervalMs: num0(a["interval-ms"], cfg.intervalMs || 4000), rlStop: num(a["rl-stop"], 5) },
     });
     log(`utworzono job ${jobId} — ${resolved.candidates.length} kandydatow, jednostki API=${resolved.apiUnits}`);
+    const cookiesPath = resolveCookiesPath(cfg, a["cookies-file"]);
+    // Jawnie zadana ścieżka, której nie ma, to błąd konfiguracji (5), nie cicha kontynuacja.
+    if (cookiesPath && !existsSync(cookiesPath)) {
+      process.stderr.write(`[yts-job] plik cookies nie istnieje: ${cookiesPath} (YTS_COOKIES_FILE albo config.cookiesFile)\n`);
+      exitNow(5); return;
+    }
     const ytDlpPath = process.env.YT_DLP || cfg.ytDlpPath || findYtDlp();
     const versionProbe = process.env.YTS_SKIP_PROBE ? "" : await ytDlpVersion(ytDlpPath);
     let result;
     try {
       result = await runJob(jobId, {
         langs: a.langs, ytdlpPath: ytDlpPath, jobDir, cacheDir,
-        intervalMs: num(a["interval-ms"], cfg.intervalMs || 4000), rlStop: num(a["rl-stop"], cfg.rlStop || 5),
+        intervalMs: num0(a["interval-ms"], cfg.intervalMs || 4000), rlStop: num(a["rl-stop"], cfg.rlStop || 5),
         proxy: cfg.proxy, allProxySource: cfg.allProxySource,
-        cookiesFile: defaultCookiesFile(cfg) || "",
+        cookiesFile: cookiesPath,
         versionProbe,
       });
-    } catch (e) { fail(e); }
+    } catch (e) { fail(e); return; }
     const { stopped, report } = result;
     process.stderr.write(`[yts-job] ${report.finished && !stopped ? "zakonczono" : "przerwano"}: ${reportSummary(report)}\n`);
     if (stopped && stopped.reason !== "user_stop") {
       const remedy = stopped.reason === "rate_limited" ? "poczekaj na spadek limitu" : stopped.reason === "bot_check" ? "ustaw YTS_COOKIES_FILE albo proxy, potem --retry-stopped" : "sprawdz proxy, potem --retry-stopped";
       process.stderr.write(`[yts-job] przyczyna: ${stopped.reason} przy ${stopped.videoId} — ${remedy}\n`);
     }
-    process.exit(stopped ? stopped.exitCode : 0);
+    exitNow(stopped ? stopped.exitCode : 0); return;
   }
 
   if (cmd === "resume") {
     if (a.proxy) errUsage("--proxy w linii komend jest zabroniony (D6).");
     if (a["ids-file"] || a.id || a.search || a.channel || a.playlist) errUsage("resume uzywa zamrozonego zbioru z state.json (Goal 4); nie podawaj zrodela");
     if (a.refresh && a["retry-stopped"]) errUsage("--refresh i --retry-stopped to rozne rzeczy (D10) — pojedynczo");
-    const cfg = await loadCfg(false);
     const jobId = a._[0];
     if (!jobId) errUsage("podaj jobId: yts-job resume <jobId>");
     let langs = a.langs || undefined;
     if (!langs) {
       try { langs = loadState(jobDir, jobId).state.langOrder.join(","); }
-      catch (e) { fail(e); }
+      catch (e) { fail(e); return; }
     } else {
       try {
         const { state, path } = loadState(jobDir, jobId);
         const next = String(a.langs).split(",").map((s) => s.trim()).filter(Boolean);
         if (next.join(",") !== state.langOrder.join(",")) log(`--langs zmienilo kolejnosc (${state.langOrder.join(",")} -> ${next.join(",")}): rekordy done stana sie stale (D4)`);
-      } catch (e) { fail(e); }
+      } catch (e) { fail(e); return; }
     }
     if (a.keywords) {
       try {
@@ -263,7 +289,13 @@ async function main() {
         state.keywords = String(a.keywords).split(",").map((s) => s.trim()).filter(Boolean);
         saveState(path, state);
         log(`keywords zaktualizowane: ${state.keywords.join(",")}`);
-      } catch (e) { fail(e); }
+      } catch (e) { fail(e); return; }
+    }
+    const cookiesPath = resolveCookiesPath(cfg, a["cookies-file"]);
+    // Jawnie zadana ścieżka, której nie ma, to błąd konfiguracji (5), nie cicha kontynuacja.
+    if (cookiesPath && !existsSync(cookiesPath)) {
+      process.stderr.write(`[yts-job] plik cookies nie istnieje: ${cookiesPath} (YTS_COOKIES_FILE albo config.cookiesFile)\n`);
+      exitNow(5); return;
     }
     const ytDlpPath = process.env.YT_DLP || cfg.ytDlpPath || findYtDlp();
     const versionProbe = process.env.YTS_SKIP_PROBE ? "" : await ytDlpVersion(ytDlpPath);
@@ -271,27 +303,27 @@ async function main() {
     try {
       result = await runJob(jobId, {
         langs, ytdlpPath: ytDlpPath, jobDir, cacheDir,
-        intervalMs: num(a["interval-ms"], cfg.intervalMs || 4000), rlStop: num(a["rl-stop"], cfg.rlStop || 5),
+        intervalMs: num0(a["interval-ms"], cfg.intervalMs || 4000), rlStop: num(a["rl-stop"], cfg.rlStop || 5),
         proxy: cfg.proxy, allProxySource: cfg.allProxySource,
-        cookiesFile: defaultCookiesFile(cfg) || "",
+        cookiesFile: cookiesPath,
         refresh: !!a.refresh, retryStopped: !!a["retry-stopped"], requireSameVersion: !!a["require-same-version"],
         versionProbe,
       });
-    } catch (e) { fail(e); }
+    } catch (e) { fail(e); return; }
     const { stopped, report } = result;
     process.stderr.write(`[yts-job] ${report.finished && !stopped ? "zakonczono" : "przerwano"}: ${reportSummary(report)}\n`);
     if (stopped && stopped.reason !== "user_stop") {
       const remedy = stopped.reason === "rate_limited" ? "poczekaj na spadek limitu" : stopped.reason === "bot_check" ? "ustaw YTS_COOKIES_FILE albo proxy, potem --retry-stopped" : "sprawdz proxy, potem --retry-stopped";
       process.stderr.write(`[yts-job] przyczyna: ${stopped.reason} przy ${stopped.videoId} — ${remedy}\n`);
     }
-    process.exit(stopped ? stopped.exitCode : 0);
+    exitNow(stopped ? stopped.exitCode : 0); return;
   }
 
   if (cmd === "status") {
     const id = a._[0];
     if (!id) errUsage("podaj jobId: yts-job status <jobId>");
     let state;
-    try { state = loadState(jobDir, id).state; } catch (e) { fail(e); }
+    try { state = loadState(jobDir, id).state; } catch (e) { fail(e); return; }
     const byReason = {};
     for (const v of Object.values(state.videos)) if (v.status === "failed") byReason[v.reason] = (byReason[v.reason] || 0) + 1;
     const frozen = state.candidates || [];
@@ -307,43 +339,43 @@ async function main() {
       sources: (state.sources || []).map((s) => ({ type: s.type, apiUnits: s.apiUnits, resolvedQuery: s.resolvedQuery || null })),
       ytdlpVersions: [...new Set(Object.values(state.videos).map((v) => v.ytdlpVersion).filter(Boolean))],
     }, null, 2) + "\n");
-    process.exit(0);
+    exitNow(0); return;
   }
 
   if (cmd === "stop") {
     const id = a._[0];
     if (!id) errUsage("podaj jobId: yts-job stop <jobId>");
-    try { loadState(jobDir, id); } catch (e) { fail(e); }
+    try { loadState(jobDir, id); } catch (e) { fail(e); return; }
     const r = stopJob(jobDir, id);
     if (r.running) {
       log(`prosba o stop zapisana — job ${id} (pid ${r.pid}) zatrzyma sie po biezacym filmie`);
-      process.exit(0);
+      exitNow(0); return;
     }
     log(`job ${id} nie jest uruchomiony — nic do zatrzymania`);
-    process.exit(0);
+    exitNow(0); return;
   }
 
   if (cmd === "report") {
     const id = a._[0];
     if (!id) errUsage("podaj jobId: yts-job report <jobId>");
     let state;
-    try { state = loadState(jobDir, id).state; } catch (e) { fail(e); }
+    try { state = loadState(jobDir, id).state; } catch (e) { fail(e); return; }
     const keywords = a.keywords ? String(a.keywords).split(",").map((s) => s.trim()).filter(Boolean) : null;
     const report = buildReport(state, { cacheDir, keywords });
     const written = writeReportFile(cacheDir, id, report);
     process.stderr.write(`[yts-job] raport: ${reportSummary(report)}\n`);
     process.stderr.write(`[yts-job] zapisano: ${written}\n`);
     process.stdout.write(JSON.stringify(report, null, 2) + "\n");
-    process.exit(0);
+    exitNow(0); return;
   }
 
   if (cmd === "repair") {
     const id = a._[0];
     if (!id) errUsage("podaj jobId: yts-job repair <jobId>");
     let cases;
-    try { cases = repair(jobDir, cacheDir, id); } catch (e) { fail(e); }
+    try { cases = repair(jobDir, cacheDir, id); } catch (e) { fail(e); return; }
     process.stdout.write(JSON.stringify(cases, null, 2) + "\n");
-    process.exit(0);
+    exitNow(0); return;
   }
 
   errUsage(`nieznana komenda: ${cmd}`);
@@ -351,5 +383,5 @@ async function main() {
 
 main().catch((e) => {
   process.stderr.write(`[yts-job] blad: ${e && e.message}\n`);
-  process.exit(e instanceof JobError ? e.code : 4);
+  exitNow(e instanceof JobError ? e.code : 4); return;
 });

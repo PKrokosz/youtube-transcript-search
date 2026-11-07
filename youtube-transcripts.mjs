@@ -65,6 +65,12 @@ const CONFIG = loadConfig();
 // Proste logi postępu — ZAWSZE na stderr (stdout w MCP to kanał JSON-RPC).
 // Wyłącz: YTS_QUIET=1.
 const QUIET = process.env.YTS_QUIET === "1";
+// Node 24 na Windowsie: process.exit() tuż po fetch (undici trzyma gniazdo)
+// wywapuje w asercję libuv. Po fetchu tylko ustawiamy kod wyjscia.
+let didFetch = false;
+function markFetched() { didFetch = true; }
+function exitNow(code) { process.exitCode = code; if (!didFetch) process.exit(code); }
+
 function log(msg) {
   if (QUIET) return;
   const ts = new Date().toISOString().slice(11, 19);
@@ -146,6 +152,7 @@ function parseArgs(argv) {
 
 // --- wyszukiwanie filmów (ytsearch) -------------------------------------
 export async function youtubeSearchYtDlp(query, limit = 5) {
+  markFetched();
   log(`  yt-dlp ytsearch${limit}: "${query}"`);
   const res = await run(["--flat-playlist", "--dump-json", "--no-warnings", `ytsearch${limit}:${query}`]);
   const items = [];
@@ -166,6 +173,7 @@ export async function youtubeSearchYtDlp(query, limit = 5) {
 const API_BASE = "https://www.googleapis.com/youtube/v3";
 
 async function apiJson(url, timeoutMs = 30000) {
+  markFetched();
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
@@ -495,24 +503,28 @@ export async function searchTranscripts(query, keywords, limit = 5, langs = "en"
 }
 
 // --- CLI ------------------------------------------------------------------
+// Uwaga: bez process.exit po fetch — na Node 24/Windows wywapuje to w asercję
+// libuv (gniazdo undici). Ustawiamy exitCode i kończymy naturalnie.
 if (process.argv[1] && process.argv[1].endsWith("youtube-transcripts.mjs")) {
   const a = parseArgs(process.argv.slice(2));
   if (a.video || a.url) {
     const id = a.video || (a.url.match(/[?&]v=([\w-]+)/) || [])[1];
     const t = await youtubeTranscript(id, a.langs);
-    if (!t.ok) { console.error("BŁĄD:", t.error); process.exit(2); }
-    if (a.raw) { console.log(t.text); process.exit(0); }
-    console.log(JSON.stringify({ videoId: id, length: t.text.length, keywords: findKeywords(t.text, a.keywords), text: t.text.slice(0, 4000) }, null, 2));
-    process.exit(0);
-  }
-  if (a.search) {
+    if (!t.ok) { console.error("BŁĄD:", t.error); exitNow(2); }
+    else if (a.raw) { console.log(t.text); exitNow(0); }
+    else {
+      console.log(JSON.stringify({ videoId: id, length: t.text.length, keywords: findKeywords(t.text, a.keywords), text: t.text.slice(0, 4000) }, null, 2));
+      exitNow(0);
+    }
+  } else if (a.search) {
     const res = await searchTranscripts(a.search, a.keywords, a.limit, a.langs, a.backend ? { backend: a.backend } : {});
     const okCount = res.filter((r) => r.transcriptAvailable).length;
     const byReason = res.filter((r) => !r.transcriptAvailable).reduce((acc, r) => { acc[r.reason] = (acc[r.reason] || 0) + 1; return acc; }, {});
     process.stderr.write(`[yts] podsumowanie: kandydaci=${res.length}, z napisami=${okCount}, bez napisów=${JSON.stringify(byReason)}\n`);
     console.log(JSON.stringify(res, null, 2));
-    process.exit(0);
+    exitNow(0);
+  } else {
+    console.error("Użycie: --search <fraza> | --video <id> | --url <link>  (opcjonalnie --keywords a,b --limit N --backend api|yt-dlp --raw)");
+    exitNow(1);
   }
-  console.error("Użycie: --search <fraza> | --video <id> | --url <link>  (opcjonalnie --keywords a,b --limit N --backend api|yt-dlp --raw)");
-  process.exit(1);
 }

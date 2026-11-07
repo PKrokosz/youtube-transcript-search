@@ -75,6 +75,7 @@ if (isList) {
   log("list");
   if (rule.error) emit(rule.error);
   const mk = (list) => { const o = {}; for (const l of list || []) o[l] = [{ ext: "vtt", url: "https://x.invalid/" + l }]; return o; };
+  if (rule.degraded) { process.stdout.write(JSON.stringify({ subtitles: {}, automatic_captions: {} }) + "\\n"); process.exit(0); }
   process.stdout.write(JSON.stringify({ subtitles: mk(rule.manual), automatic_captions: mk(rule.auto) }) + "\\n");
   process.exit(0);
 }
@@ -92,7 +93,7 @@ for (const lang of langs) {
   const useManual = wantManual && hasManual;
   const useAuto = !useManual && wantAuto && hasAuto;
   if (!useManual && !useAuto) continue;
-  const file = template.replace("%(id)s", id).replace("%(lang)s", lang).replace("%(ext)s", "vtt");
+  const file = template.replace("%(id)s", id).replace("%(lang)s", "NA." + lang).replace("%(ext)s", "vtt");
   const dir = dirname(file);
   mkdirSync(dir, { recursive: true });
   const lines = ["WEBVTT", "Kind: captions", "Language: " + lang, ""];
@@ -168,9 +169,14 @@ const noSleep = () => Promise.resolve();
     const argsManual = buildArgs({ videoId: ID_A, lang: "pl", kind: "manual", outDir: "C:/tmp/x", cookiesFile: "" });
     ok("buildArgs: manual -> tylko --write-subs", argsManual.includes("--write-subs") && !argsManual.includes("--write-auto-subs") && argsManual.includes("--no-write-auto-subs"));
     ok("buildArgs: auto -> tylko --write-auto-subs", buildArgs({ videoId: ID_A, lang: "pl", kind: "auto", outDir: "C:/tmp/x" }).includes("--write-auto-subs"));
-    ok("buildArgs: --retries 0 (retries yt-dlp nie kumuluja sie)", buildArgs({ videoId: ID_A, lang: "pl", kind: "auto", outDir: "C:/tmp/x" }).includes("--retries") && buildArgs({ videoId: ID_A, lang: "pl", kind: "auto", outDir: "C:/tmp/x" })[buildArgs({ videoId: ID_A, lang: "pl", kind: "auto", outDir: "C:/tmp/x" }).indexOf("--retries") + 1] === "0");
+    ok("buildArgs: wewnetrzna retry yt-dlp ograniczona do 2 (per-request, nie kumuluje sie)", buildArgs({ videoId: ID_A, lang: "pl", kind: "auto", outDir: "C:/tmp/x" })[buildArgs({ videoId: ID_A, lang: "pl", kind: "auto", outDir: "C:/tmp/x" }).indexOf("--retries") + 1] === "2", "--retries 0 zamienial chwilowa odpowiedź bez napisow w terminalne no_subtitles");
     ok("buildArgs: proxy NIGDY w argv", !buildArgs({ videoId: ID_A, lang: "pl", kind: "auto", outDir: "C:/tmp/x" }).some((x) => String(x).includes("proxy")));
-    ok("buildArgs: cookies idzie jako sciezka", buildArgs({ videoId: ID_A, lang: "pl", kind: "manual", outDir: "C:/tmp/x", cookiesFile: "C:/cookies.txt" }).includes("C:/cookies.txt"));
+    const jestCookies = join(tmpdir(), "yts-cookies-test.txt");
+    writeFileSync(jestCookies, "# test cookies", "utf8");
+    ok("buildArgs: istniejący cookies idzie jako sciezka", buildArgs({ videoId: ID_A, lang: "pl", kind: "manual", outDir: "C:/tmp/x", cookiesFile: jestCookies }).includes(jestCookies));
+    const nieMa = join(tmpdir(), "yts-nie-ma-takiego.txt");
+    ok("buildArgs: nieistniejacy cookies NIE idzie do argv (live demo to zlapalo)", !buildArgs({ videoId: ID_A, lang: "pl", kind: "manual", outDir: "C:/tmp/x", cookiesFile: nieMa }).some((x) => String(x) === nieMa), "yt-dlp exit 2 na nieistniejacej sciezce");
+    rmSync(jestCookies, { force: true });
     const names = expectedFilenames(ID_A, "pl,en");
     ok("expectedFilenames: NA.<lang> pierwsze", names[0] === `s.${ID_A}.NA.pl.vtt` && names[2] === `s.${ID_A}.NA.en.vtt`, JSON.stringify(names));
     ok("expectedFilenames: bez skanu katalogu (dokladna lista)", names.length === 4);
@@ -663,6 +669,118 @@ createServer((req, res) => {
     ok("CLI --search: lang jako kod jezyka (nie vtt)", !!arr && arr.every((v) => v.transcriptAvailable === false || typeof v.lang === "string"), JSON.stringify(arr && arr.map((v) => v.lang)));
     ok("CLI --search: kind na wpisach z napisami", !!arr && arr.filter((v) => v.transcriptAvailable).every((v) => typeof v.kind === "string"), JSON.stringify(arr && arr.map((v) => v.kind)));
     ok("CLI --search: reason niszy niz reason z yt-dlp (bez pustego wyniku)", !!arr && arr.some((v) => v.reason === "video_unavailable"), JSON.stringify(arr && arr.map((v) => v.reason)));
+  }
+
+
+  // ============ 17) domyslne katalogi (bez --cache-dir / --job-dir) =======
+  {
+    // Live demo to zlapal: job bez --cache-dir wpadal w join(undefined, ...).
+    // Tutyl: modul sam rozwiazuje katalogi, CLI przekazuje YTS_*_DIR z loadera.
+    const cfgDir = mkdtempSync(join(tmpdir(), "yts-defcache-"));
+    const jobDir2 = mkdtempSync(join(tmpdir(), "yts-defjobs-"));
+    const { clock } = clockStarter();
+    process.env.YT_DLP = makeShim(mkdtempSync(join(tmpdir(), "yts-defshim-")), { [ID_A]: RULE.manual });
+    createJob({ jobId: "nocache", langs: "pl", keywords: [], jobDir: jobDir2, candidateIds: [ID_A] });
+    // UWAGA: cacheDir celowo nie podajemy — runner ma rozwiazac go sam.
+    const r = await runJob("nocache", { langs: "pl", ytdlpPath: process.env.YT_DLP, jobDir: jobDir2, intervalMs: 0, rlStop: 2, clock, sleep: noSleep, versionProbe: "2099.01.01" });
+    ok("domyslny cache: job dziala bez --cache-dir", r.report.obtained === 1, JSON.stringify(r.report.videos[0]));
+    const cacheHit = getCache(undefined, cacheKey(ID_A, "pl", "manual"));
+    ok("domyslny cache: wpis w <module>/.cache", !!cacheHit, String(!!cacheHit));
+    if (cacheHit) {
+      const p2 = cachePaths(undefined, cacheKey(ID_A, "pl", "manual"));
+      rmSyncSync(join(p2.text)); rmSyncSync(join(p2.meta)); rmSyncSync(join(p2.raw));
+    }
+    // CLI: YTS_JOB_DIR / YTS_CACHE_DIR z loadera dochodza do runnera
+    const env = { ...process.env, YT_DLP: process.env.YT_DLP, YTS_SKIP_PROBE: "1", YTS_JOB_DIR: jobDir2, YTS_CACHE_DIR: cfgDir };
+    const rr = spawnSync("node", [join(ROOT, "yts-job.mjs"), "new", "--id", ID_A, "--langs", "pl", "--keywords", "x", "--job", "envdirs", "--interval-ms", "0"], { encoding: "utf8", env });
+    ok("CLI: YTS_JOB_DIR z env (bez --job-dir)", rr.status === 0 && existsSync(join(jobDir2, "envdirs", "state.json")), rr.stderr.slice(0, 160));
+    ok("CLI: YTS_CACHE_DIR z env (bez --cache-dir)", existsSync(join(cfgDir, "subs", ID_A + ".pl.manual.p1.txt")), "brak wpisu w cache z env");
+    rmSyncSync(cfgDir); rmSyncSync(jobDir2);
+  }
+
+
+  // ============ 18) CLI: jawnie zadane cookies, ktorych nie ma ============
+  {
+    const dir = join(shimDir, "jobs13"), cacheDir13 = join(shimDir, "cache13");
+    const env = { ...process.env, YT_DLP: process.env.YT_DLP, YTS_SKIP_PROBE: "1" };
+    const run = (args) => spawnSync("node", [join(ROOT, "yts-job.mjs"), ...args], { encoding: "utf8", env });
+    const r = run(["new", "--id", ID_A, "--langs", "pl", "--keywords", "x", "--job-dir", dir, "--cache-dir", cacheDir13, "--cookies-file", join(tmpdir(), "yts-nie-ma.txt")]);
+    ok("CLI: zadane cookies bez pliku -> exit 5", r.status === 5 && /plik cookies nie istnieje/.test(r.stderr), String(r.status) + " " + r.stderr.slice(0, 140));
+    // domyslna sciezka (~/.config/yts/cookies.txt) nie istnieje -> flaga nie idzie wcale
+    const r2 = run(["new", "--id", ID_A, "--langs", "pl", "--keywords", "x", "--job-dir", dir, "--cache-dir", cacheDir13, "--job", "bezcookies", "--interval-ms", "0"]);
+    ok("CLI: bez pliku cookies domyslnego job dziala", r2.status === 0 && /z napisami=1/.test(r2.stderr), r2.stderr.slice(-140));
+  }
+
+
+  // ============ 19) degragowane listing: nie wierzymy, próbujemy pobrać ====
+  {
+    // Live demo to zlapalo: YouTube zdegaduje odpowiedz playera (pod 429),
+    // listing nie widzi sciezek, a `no_subtitles` jest terminalne — fałszywy
+    // negatyw przeżyłby caly job. Rozstrzyga faktyczna próba pobrania.
+    const dir = join(shimDir, "jobs14"), cacheDir14 = join(shimDir, "cache14");
+    const { clock } = clockStarter();
+    const shimDeg = makeShim(mkdtempSync(join(tmpdir(), "yts-deg-")), { [ID_A]: { degraded: true, manual: ["pl"], auto: [] } });
+    createJob({ jobId: "jdeg", langs: "pl,en", keywords: ["rust"], jobDir: dir, cacheDir: cacheDir14, candidateIds: [ID_A] });
+    const r = await runJob("jdeg", { langs: "pl,en", ytdlpPath: shimDeg, jobDir: dir, cacheDir: cacheDir14, intervalMs: 0, rlStop: 2, clock, sleep: noSleep, versionProbe: "2099.01.01" });
+    ok("degraded listing: film zapisany jako done (nie no_subtitles)", r.report.obtained === 1 && !r.report.failedByReason.no_subtitles, JSON.stringify(r.report.videos[0]));
+    ok("degraded listing: napisy faktycznie w cache", !!getCache(cacheDir14, cacheKey(ID_A, "pl", "manual")), String(!!getCache(cacheDir14, cacheKey(ID_A, "pl", "manual"))));
+    // a gdy pliku naprawde nie ma -> no_subtitles po PRAWDZIWEJ próbie
+    const shimDeg2 = makeShim(mkdtempSync(join(tmpdir(), "yts-deg2-")), { [ID_B]: { degraded: true, manual: [], auto: [] } });
+    createJob({ jobId: "jdeg2", langs: "pl,en", keywords: [], jobDir: dir, cacheDir: cacheDir14, candidateIds: [ID_B] });
+    const r2 = await runJob("jdeg2", { langs: "pl,en", ytdlpPath: shimDeg2, jobDir: dir, cacheDir: cacheDir14, intervalMs: 0, rlStop: 2, clock, sleep: noSleep, versionProbe: "2099.01.01" });
+    ok("degraded listing + brak pliku: no_subtitles po prawdziwej próbie", r2.report.failedByReason.no_subtitles === 1, JSON.stringify(r2.report.failedByReason));
+  }
+
+
+  // ============ 20) cache bije siec tez miedzy jobami (Goal 1/9) ==========
+  {
+    // Demo na zywo to zlapalo: po falszywym no_subtitles nowy job pobralby
+    // wszystko od nowa. Job czyta wiec cache PRZED lista — inny job, te same
+    // filmy, zero spawnow yt-dlp.
+    const dir = join(shimDir, "jobs15"), cacheDir15 = join(shimDir, "cache15");
+    const { clock } = clockStarter();
+    const ownDir = mkdtempSync(join(tmpdir(), "yts-sec20-"));
+    const ownShim = makeShim(ownDir, { [ID_A]: RULE.manual, [ID_B]: RULE.manual });
+    const ownSpawns = () => spawnCount(ownDir);
+    const base = { langs: "pl", ytdlpPath: ownShim, jobDir: dir, cacheDir: cacheDir15, intervalMs: 0, rlStop: 2, clock, sleep: noSleep, versionProbe: "2099.01.01" };
+    createJob({ jobId: "ja", langs: "pl", keywords: ["rust"], jobDir: dir, cacheDir: cacheDir15, candidateIds: [ID_A, ID_B] });
+    const r1 = await runJob("ja", base);
+    ok("read-through: pierwszy job pobiera", r1.report.obtained === 2, JSON.stringify(r1.report.videos.map((v) => v.status)));
+    const spawns1 = ownSpawns();
+    createJob({ jobId: "jb", langs: "pl", keywords: ["rust"], jobDir: dir, cacheDir: cacheDir15, candidateIds: [ID_A, ID_B] });
+    const r2 = await runJob("jb", base);
+    ok("read-through: drugi job ZERO nowych spawnow", ownSpawns() === spawns1, `${spawns1} -> ${ownSpawns()}`);
+    ok("read-through: drugi job tez done", r2.report.obtained === 2);
+    ok("read-through: z cache, nie z sieci", loadState(dir, "jb").state.videos[ID_A].status === "done");
+    // --refresh omija cache celowo (D10: jawna prosba o ponowne pobranie)
+    const spawns2 = ownSpawns();
+    await runJob("jb", { ...base, refresh: true });
+    ok("--refresh omija cache (pobiera na nowo)", ownSpawns() > spawns2, `${spawns2} -> ${ownSpawns()}`);
+  }
+
+
+  // ============ 21) template: yt-dlp sam dokleja NA. do %(lang)s =========
+  {
+    // Demo na zywo to zlapalo: template z dosłownym `NA.` daje plik
+    // `s.<id>.NA.NA.<lang>.vtt`, expectedFilenames go nie znajduje i KAZDA
+    // udana pobieranie byla raportowana jako `no_subtitles`. yt-dlp rozwija
+    // `%(lang)s` do `NA.<lang>` sam (manual ORAZ auto) — template tego nie powtarza.
+    const asym = buildArgs({ videoId: ID_A, lang: "pl", kind: "auto", outDir: "C:/tmp/x" });
+    const outIdx = asym.indexOf("-o");
+    ok("template: BEZ doslownego NA. (yt-dlp dokleja sam)", !asym[outIdx + 1].includes("NA."), asym[outIdx + 1]);
+    const names = expectedFilenames(ID_A, "pl");
+    ok("expectedFilenames: NA.<lang> pierwsze (tak rozwija yt-dlp)", names[0] === "s." + ID_A + ".NA.pl.vtt", JSON.stringify(names));
+    ok("expectedFilenames: bez NA. jako zapas", names.includes("s." + ID_A + ".pl.vtt"));
+    // calosc: shim odwzorowuje yt-dlp (dokleja NA.), runner znajduje plik
+    const ownDir = mkdtempSync(join(tmpdir(), "yts-sec21-"));
+    const ownShim = makeShim(ownDir, { [ID_A]: RULE.auto, [ID_B]: RULE.manual });
+    const dir = join(ownDir, "jobs"), cacheDir21 = join(ownDir, "cache");
+    const { clock } = clockStarter();
+    createJob({ jobId: "jtpl", langs: "pl", keywords: ["rust"], jobDir: dir, cacheDir: cacheDir21, candidateIds: [ID_A, ID_B] });
+    const r = await runJob("jtpl", { langs: "pl", ytdlpPath: ownShim, jobDir: dir, cacheDir: cacheDir21, intervalMs: 0, rlStop: 2, clock, sleep: noSleep, versionProbe: "2099.01.01" });
+    ok("szablon end-to-end: oba filmy done", r.report.obtained === 2, JSON.stringify(r.report.videos.map((v) => [v.id, v.status, v.reason])));
+    ok("szablon end-to-end: nazwa z NA. trafia do oczekiwanej", !!getCache(cacheDir21, cacheKey(ID_A, "pl", "auto")) && !!getCache(cacheDir21, cacheKey(ID_B, "pl", "manual")), "brak wpisow w cache");
+    rmSyncSync(ownDir);
   }
 
   rmSyncSync(shimDir);
